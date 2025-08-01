@@ -6,11 +6,11 @@ import re
 
 st.set_page_config(page_title="30分値リスケーリング（全時間帯）", layout="wide")
 
-st.title("サンプル30分値作成アプリ")
+st.title("サンプル30分値リスケーリングアプリ（全時間帯）")
 st.markdown(
     """
-    目的：同一業種などサンプルの30分値データから月ごとの合計使用量に合わせて
-    **全ての時間帯列を同一比率で再計算**した新しいデータを出力します。
+    目的：サンプルの30分値データ（横に時間帯列を持つ形式）を、月ごとの合計使用量に合わせて
+    **全ての時間帯列を同一比率でスケーリング**した新しいデータを出力します。
     """
 )
 
@@ -83,13 +83,8 @@ except Exception as e:
     st.stop()
 
 # --- 時間帯列の自動検出（00:00:00 形式を優先） ---
-# 典型的な 30 分刻みの "HH:MM:SS" ラベル（例: 00:00:00, 00:30:00, ..., 23:30:00）
 expected_time_labels_hms = [f"{h:02d}:{m:02d}:00" for h in range(24) for m in (0, 30)]
-
-# 優先：完全一致（秒付きラベル）
 candidate_time_cols = [c for c in df.columns if str(c).strip() in expected_time_labels_hms]
-
-# フォールバック：柔軟に "HH:MM" または "HH:MM:SS" を拾う正規表現（30分刻み前提）
 if not candidate_time_cols:
     pattern = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d(:00)?$")
     candidate_time_cols = [c for c in df.columns if pattern.match(str(c).strip())]
@@ -107,11 +102,8 @@ if not time_cols:
 
 # --- 月ごとの集計と目標入力 ---
 df["__year_month"] = df[date_col].dt.to_period("M")
-
-# 各行の全時間帯合計（選択された列の合計）
 df["_row_total"] = df[time_cols].sum(axis=1)
 
-# 月ごとの元の合計使用量
 monthly_original = (
     df.groupby("__year_month")["_row_total"]
     .sum()
@@ -120,23 +112,61 @@ monthly_original = (
 )
 monthly_original["表示用月"] = monthly_original.index.to_timestamp()
 
+# --- 横並び入力フォーム ---
+target_inputs = {}
 st.subheader("各月の元の合計使用量と新しい月合計の入力")
 st.markdown("各月ごとに目標とする合計使用量を入力してください。選択された全時間帯列の合計がその値になるようスケーリングされます。")
 
-target_inputs = {}
 with st.form("monthly_targets_form"):
+    # カード状の横スクロールコンテナ用スタイル
+    st.markdown(
+        """
+        <style>
+        .horizontal-inputs {
+            display: flex;
+            gap: 12px;
+            overflow-x: auto;
+            padding: 6px 0;
+        }
+        .monthly-box {
+            min-width: 160px;
+            flex: 0 0 auto;
+            background: #f1f5f9;
+            padding: 8px;
+            border-radius: 8px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        }
+        .monthly-label {
+            font-weight: 600;
+            margin-bottom: 4px;
+            font-size: 0.9rem;
+        }
+        .small-meta {
+            font-size: 0.65rem;
+            color: #555;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="horizontal-inputs">', unsafe_allow_html=True)
     for period, row in monthly_original.iterrows():
         label = period.strftime("%Y-%m")
         orig = row["元の月合計"]
         default = float(round(orig, 6))
+        st.markdown(f'<div class="monthly-box">', unsafe_allow_html=True)
+        st.markdown(f'<div class="monthly-label">{label}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="small-meta">元の合計: {orig:.6f}</div>', unsafe_allow_html=True)
         target_inputs[label] = st.number_input(
-            label=f"{label} の新しい月合計使用量",
+            label="",  # HTML側で月表示済み
             value=default,
             format="%.6f",
-            help=f"元の合計: {orig:.6f}",
             key=f"target_{label}",
             min_value=0.0,
+            help=f"{label} の目標（月合計）",
         )
+        st.markdown("</div>", unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
     submitted = st.form_submit_button("スケーリング実行")
 
 if not submitted:
@@ -156,11 +186,10 @@ for label, target in target_inputs.items():
 df_scaled = df.copy()
 df_scaled["__scale_factor"] = df_scaled["__year_month"].map(scaling)
 
-# 全時間帯列を係数でスケーリング（NaN は元の値）
 for col in time_cols:
     df_scaled[col] = df_scaled[col] * df_scaled["__scale_factor"].where(df_scaled["__scale_factor"].notna(), 1.0)
 
-# --- 結果表示 ---
+# --- 検証表示 ---
 st.subheader("スケーリング後の各月合計の検証")
 scaled_monthly = (
     df_scaled.groupby("__year_month")[time_cols]
