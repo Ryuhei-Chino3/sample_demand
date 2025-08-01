@@ -7,7 +7,7 @@ from openpyxl import load_workbook
 from openpyxl.chart import LineChart, Reference
 
 st.set_page_config(page_title="30分値リスケーリングアプリ", layout="wide")
-st.title("30分値リスケーリングアプリ（最大・最小月のデマンドカーブ付き）")
+st.title("30分値リスケーリングアプリ（最大・最小・平均月のデマンドカーブ付き）")
 
 st.sidebar.header("1. ファイルアップロード")
 uploaded_file = st.sidebar.file_uploader("CSV または XLSX ファイルをアップロード", type=["csv", "xlsx"])
@@ -36,7 +36,6 @@ date_col = st.sidebar.selectbox(
     options=df_raw.columns.tolist(),
     index=default_index
 )
-
 
 df = df_raw.copy()
 df[date_col] = pd.to_datetime(df[date_col])
@@ -91,6 +90,7 @@ def to_excel_bytes_with_curve(df_rescaled, time_cols):
 
     max_curve = df_rescaled[df_rescaled["__year_month"] == max_month][time_cols].mean()
     min_curve = df_rescaled[df_rescaled["__year_month"] == min_month][time_cols].mean()
+    avg_curve = df_rescaled[time_cols].mean()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_rescaled.drop(columns=["__scale_factor"], errors="ignore").to_excel(writer, index=False, sheet_name="Rescaled")
@@ -98,6 +98,7 @@ def to_excel_bytes_with_curve(df_rescaled, time_cols):
             "時間帯": time_cols,
             f"{max_month.strftime('%Y-%m')}（最大）": max_curve.values,
             f"{min_month.strftime('%Y-%m')}（最小）": min_curve.values,
+            "年間平均": avg_curve.values
         })
         df_curve.to_excel(writer, index=False, sheet_name="DemandCurve")
 
@@ -106,16 +107,16 @@ def to_excel_bytes_with_curve(df_rescaled, time_cols):
     ws = wb["DemandCurve"]
 
     chart = LineChart()
-    chart.title = "最大月・最小月のデマンドカーブ"
+    chart.title = "最大月・最小月・年間平均のデマンドカーブ"
     chart.y_axis.title = "平均使用量"
     chart.x_axis.title = "時間帯"
 
     max_row = ws.max_row
-    data = Reference(ws, min_col=2, max_col=3, min_row=1, max_row=max_row)
+    data = Reference(ws, min_col=2, max_col=4, min_row=1, max_row=max_row)
     cats = Reference(ws, min_col=1, min_row=2, max_row=max_row)
     chart.add_data(data, titles_from_data=True)
     chart.set_categories(cats)
-    ws.add_chart(chart, f"E{max_row + 2}")
+    ws.add_chart(chart, f"F{max_row + 2}")
 
     out_bytes = BytesIO()
     wb.save(out_bytes)
