@@ -5,7 +5,6 @@ from io import BytesIO
 import re
 from openpyxl import load_workbook
 from openpyxl.chart import LineChart, Reference
-from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="30分値リスケーリング（全時間帯）", layout="wide")
 
@@ -165,16 +164,11 @@ for col in time_cols:
     df_scaled[col] = df_scaled[col] * df_scaled["__scale_factor"].where(df_scaled["__scale_factor"].notna(), 1.0)
 
 # --- デマンドカーブ（各月の平均プロファイル）作成 ---
-# 各月ごとに時間帯列の平均（30分値の平均プロファイル）
 monthly_profile = (
     df_scaled.groupby("__year_month")[time_cols]
     .mean()
-    .rename_axis(index="__year_month")
-)  # index is Period
-
-# 形式整形：行を時間帯、列を YYYY-MM 表示
-profile_df = monthly_profile.T  # time_cols as index, months as columns
-# Convert Period columns to string like "2024-03"
+)
+profile_df = monthly_profile.T
 profile_df.columns = [p.strftime("%Y-%m") for p in profile_df.columns]
 
 # --- 検証表示 ---
@@ -212,22 +206,14 @@ if not output_name.lower().endswith(".xlsx"):
 def to_excel_bytes_with_curve(df_rescaled: pd.DataFrame, curve_df: pd.DataFrame):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # スケーリング済みデータ（元の構造を保つ）
         to_export_main = df_rescaled.drop(columns=["__year_month", "_row_total", "__scale_factor"], errors="ignore")
         to_export_main.to_excel(writer, index=False, sheet_name="Rescaled")
-        # デマンドカーブ元データ（時間帯 × 月）
-        # Insert a column for time label at top
-        curve_df_reset = curve_df.reset_index()
-        curve_df_reset = curve_df_reset.rename(columns={"index": "時間帯"})
+        curve_df_reset = curve_df.reset_index().rename(columns={"index": "時間帯"})
         curve_df_reset.to_excel(writer, index=False, sheet_name="DemandCurve")
-        writer.save()
-
-    # Now open to add chart
     output.seek(0)
     wb = load_workbook(filename=output)
     ws = wb["DemandCurve"]
 
-    # Determine data range: time in A, months in B...
     max_row = ws.max_row
     max_col = ws.max_column
 
@@ -236,26 +222,17 @@ def to_excel_bytes_with_curve(df_rescaled: pd.DataFrame, curve_df: pd.DataFrame)
     chart.y_axis.title = "平均使用量"
     chart.x_axis.title = "時間帯"
 
-    # X axis: time labels in column A, skip header row
     cats = Reference(ws, min_col=1, min_row=2, max_row=max_row)
-
-    # Each month series
     for col_idx in range(2, max_col + 1):
-        data = Reference(ws, min_col=col_idx, min_row=1, max_row=max_row)  # includes header for titles
-        series = Reference(ws, min_col=col_idx, min_row=2, max_row=max_row)
-        chart.add_data(series, titles_from_data=False)
+        data = Reference(ws, min_col=col_idx, min_row=2, max_row=max_row)
+        chart.add_data(data, titles_from_data=False)
+        header_value = ws.cell(row=1, column=col_idx).value
+        if chart.series:
+            chart.series[-1].title = header_value
+
     chart.set_categories(cats)
-    # Improve legend: use header row labels as series titles
-    for i, col_idx in enumerate(range(2, max_col + 1)):
-        if i < len(chart.series):
-            header_cell = ws.cell(row=1, column=col_idx).value
-            chart.series[i].title = header_cell
+    ws.add_chart(chart, f"B{max_row + 2}")
 
-    # Place chart below table (e.g., starting two rows after)
-    anchor_row = max_row + 2
-    ws.add_chart(chart, f"B{anchor_row}")
-
-    # Save workbook back to bytes
     out_bytes = BytesIO()
     wb.save(out_bytes)
     return out_bytes.getvalue()
