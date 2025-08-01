@@ -27,26 +27,20 @@ if uploaded_file is None:
 @st.cache_data
 def load_sample(file) -> pd.DataFrame:
     name = file.name.lower()
-    try:
-        if name.endswith(".csv"):
-            df = pd.read_csv(file)
-        elif name.endswith((".xls", ".xlsx")):
-            try:
-                df = pd.read_excel(file)
-            except ImportError as ie:
-                # openpyxl がない/読み込めない場合
-                raise RuntimeError(
-                    "Excel 読み込みに必要なライブラリ（openpyxl）が見つかりません。"
-                    " requirements.txt に `openpyxl` を追加して再デプロイしてください。"
-                ) from ie
-        else:
-            raise ValueError("対応していないファイル形式です。CSVかXLSXをアップロードしてください。")
-    except Exception as e:
-        # 上位で表示させるため再送出
-        raise
+    if name.endswith(".csv"):
+        df = pd.read_csv(file)
+    elif name.endswith((".xls", ".xlsx")):
+        try:
+            df = pd.read_excel(file)
+        except ImportError as ie:
+            raise RuntimeError(
+                "Excel 読み込みに必要なライブラリ（openpyxl）が見つかりません。"
+                " requirements.txt に `openpyxl` を追加して再デプロイしてください。"
+            ) from ie
+    else:
+        raise ValueError("対応していないファイル形式です。CSVかXLSXをアップロードしてください。")
     return df
 
-# 実際の読込（エラーがあれば表示）
 try:
     df_raw = load_sample(uploaded_file)
 except Exception as e:
@@ -58,21 +52,31 @@ st.dataframe(df_raw.head())
 
 # --- 列指定 ---
 st.sidebar.header("2. 列指定（自動検出がうまくいかなければ調整）")
-# 自動で日付っぽいと判断される列を探す
 possible_datetime = []
 for col in df_raw.columns:
     try:
         parsed = pd.to_datetime(df_raw[col], errors="coerce")
-        non_na_ratio = parsed.notna().mean()
-        if non_na_ratio > 0.5:
+        if parsed.notna().mean() > 0.5:
             possible_datetime.append(col)
     except Exception:
         continue
 
+# 安全に int にキャストし、範囲チェックする
+default_index = 0
+if possible_datetime:
+    try:
+        idx_array = df_raw.columns.get_indexer([possible_datetime[0]])
+        if len(idx_array) > 0:
+            candidate = int(idx_array[0])  # numpy.int64 を明示的に int 化
+            if 0 <= candidate < len(df_raw.columns):
+                default_index = candidate
+    except Exception:
+        default_index = 0
+
 datetime_col = st.sidebar.selectbox(
     "日時列を選択してください",
     options=df_raw.columns.tolist(),
-    index=0 if not possible_datetime else df_raw.columns.get_indexer([possible_datetime[0]])[0]
+    index=default_index,
 )
 
 df = df_raw.copy()
@@ -96,7 +100,7 @@ if usage_col is None or datetime_col is None:
     st.stop()
 
 # --- 月ごとの集計と入力フォーム ---
-df["__year_month"] = df[datetime_col].dt.to_period("M")  # e.g., 2024-06
+df["__year_month"] = df[datetime_col].dt.to_period("M")
 
 monthly_original = (
     df.groupby("__year_month")[usage_col]
@@ -186,11 +190,13 @@ if not output_name.lower().endswith(".xlsx"):
 to_export = df_scaled.copy()
 to_export = to_export.drop(columns=["__year_month"])
 
+
 def to_excel_bytes(df: pd.DataFrame):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Rescaled")
     return output.getvalue()
+
 
 try:
     excel_bytes = to_excel_bytes(to_export)
