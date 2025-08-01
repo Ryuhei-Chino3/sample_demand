@@ -109,97 +109,35 @@ monthly_original = (
 )
 monthly_original["表示用月"] = monthly_original.index.to_timestamp()
 
-# --- 目標入力（表形式を優先、なければカード形式） ---
-target_inputs = {}
+# --- 月使用量入力（年月ラベル1行、その下に入力欄） ---
 st.subheader("各月の元の合計使用量と新しい月合計の入力")
-st.markdown("各月ごとに目標とする合計使用量を指定してください。選択された全時間帯列の合計がその値になるようスケーリングされます。")
+st.markdown("年月ラベルとその下に目標月使用量を横並びで入力してください。")
 
-use_table = False
-edited_df = None
-# 優先：experimental_data_editor または data_editor
-if hasattr(st, "experimental_data_editor"):
-    use_table = True
-    editable = monthly_original.reset_index()
-    editable["表示用月"] = editable["__year_month"].dt.strftime("%Y-%m")
-    editable = editable.rename(columns={"元の月合計": "元の月合計使用量"})
-    editable["入力目標"] = editable["元の月合計使用量"]
-    edited_df = st.experimental_data_editor(
-        editable[["__year_month", "表示用月", "元の月合計使用量", "入力目標"]],
-        num_rows="fixed",
-        use_container_width=True,
-    )
-elif hasattr(st, "data_editor"):
-    use_table = True
-    editable = monthly_original.reset_index()
-    editable["表示用月"] = editable["__year_month"].dt.strftime("%Y-%m")
-    editable = editable.rename(columns={"元の月合計": "元の月合計使用量"})
-    editable["入力目標"] = editable["元の月合計使用量"]
-    edited_df = st.data_editor(
-        editable[["__year_month", "表示用月", "元の月合計使用量", "入力目標"]],
-        num_rows="fixed",
-        use_container_width=True,
-    )
+# フォーム
+with st.form("monthly_targets_form"):
+    periods = list(monthly_original.index)
+    labels = [p.strftime("%Y/%-m") if hasattr(p, "strftime") else str(p) for p in periods]  # e.g., 2024/3
+    cols = st.columns(len(periods))
+    target_inputs = {}
+    for col, period, label in zip(cols, periods, labels):
+        with col:
+            st.markdown(f"**{label}**")
+            orig = monthly_original.loc[period, "元の月合計"]
+            default = float(round(orig, 6))
+            val = st.number_input(
+                label="入力",
+                value=default,
+                format="%.6f",
+                key=f"target_{period}",
+                min_value=0.0,
+                help=f"元の合計: {orig:.6f}",
+            )
+            target_inputs[period.strftime("%Y-%m")] = float(val)
+    submitted = st.form_submit_button("スケーリング実行")
 
-if use_table and edited_df is not None:
-    for _, row in edited_df.iterrows():
-        label = row["表示用月"]  # "YYYY-MM"
-        try:
-            target_value = float(row["入力目標"])
-        except Exception:
-            target_value = float(row["元の月合計使用量"])
-        target_inputs[label] = target_value
-else:
-    # フォールバック：横スクロールカード入力（number_input）
-    st.markdown(
-        """
-        <style>
-        .horizontal-inputs {
-            display: flex;
-            gap: 12px;
-            overflow-x: auto;
-            padding: 6px 0;
-        }
-        .monthly-box {
-            min-width: 160px;
-            flex: 0 0 auto;
-            background: #f1f5f9;
-            padding: 8px;
-            border-radius: 8px;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-        }
-        .monthly-label {
-            font-weight: 600;
-            margin-bottom: 4px;
-            font-size: 0.9rem;
-        }
-        .small-meta {
-            font-size: 0.65rem;
-            color: #555;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown('<div class="horizontal-inputs">', unsafe_allow_html=True)
-    for period, row in monthly_original.iterrows():
-        label = period.strftime("%Y-%m")
-        orig = row["元の月合計"]
-        default = float(round(orig, 6))
-        st.markdown(f'<div class="monthly-box">', unsafe_allow_html=True)
-        st.markdown(f'<div class="monthly-label">{label}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="small-meta">元の合計: {orig:.6f}</div>', unsafe_allow_html=True)
-        # number_input を直接使う（ラベル空にして見た目をコンパクトに）
-        target_value = st.number_input(
-            label="",
-            value=default,
-            format="%.6f",
-            key=f"target_{label}",
-            min_value=0.0,
-            help=f"{label} の目標（月合計）",
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-        target_inputs[label] = float(target_value)
-    st.markdown('</div>', unsafe_allow_html=True)
+if not submitted:
+    st.info("上の行に各月の目標使用量を入力して「スケーリング実行」を押してください。")
+    st.stop()
 
 # --- スケーリング ---
 scaling = {}
