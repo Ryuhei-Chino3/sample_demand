@@ -54,7 +54,7 @@ st.dataframe(df_raw.head())
 # --- 日付/日時列指定 ---
 st.sidebar.header("2. 日付列と時間帯列の指定")
 
-# 自動候補：日付っぽい列
+# 日付っぽい列を自動検出
 possible_date_cols = []
 for col in df_raw.columns:
     try:
@@ -82,31 +82,36 @@ except Exception as e:
     st.error(f"{date_col} を日時に変換できませんでした。形式を確認してください。詳細: {e}")
     st.stop()
 
-# --- 時間帯列の自動検出（0:00〜23:30）と確認 ---
-def is_time_label(col_name: str) -> bool:
-    # 0:00, 0:30, 00:00, 23:30 などをカバー。時刻表記に余裕持たせる。
-    pattern = r"^([01]?\d|2[0-3]):[0-5]\d$"
-    return bool(re.match(pattern, str(col_name).strip()))
+# --- 時間帯列の自動検出（強化版） ---
+# 典型的な 30 分刻みのラベルを明示リスト化（0:00, 0:30, ..., 23:30）
+expected_time_labels = [f"{h}:{m:02d}" for h in range(24) for m in (0, 30)]
 
-candidate_time_cols = [c for c in df.columns if is_time_label(c)]
-st.sidebar.markdown("**自動検出された30分刻みの時間帯列（必要なら調整）**")
+# 優先：明示的なラベルとの一致で候補を取る
+candidate_time_cols = [c for c in df.columns if str(c) in expected_time_labels]
+
+# フォールバック：柔軟に 0:00〜23:30 形式を拾う正規表現
+if not candidate_time_cols:
+    pattern = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
+    candidate_time_cols = [c for c in df.columns if pattern.match(str(c).strip())]
+
+st.sidebar.markdown("**自動検出された時間帯列（必要なら調整）**")
 time_cols = st.sidebar.multiselect(
-    "スケーリング対象とする時間帯列を選択（全部選ぶのが通常）",
+    "スケーリング対象とする時間帯列を選択（通常はすべて選択）",
     options=df.columns.tolist(),
     default=candidate_time_cols if candidate_time_cols else []
 )
 
 if not time_cols:
-    st.error("0:00〜23:30 に相当する時間帯列が自動検出されませんでした。手動で選択してください。")
+    st.error("時間帯列が選択されていません。0:00〜23:30 に相当する列を手動で選択してください。")
     st.stop()
 
-# --- 月ごとの集計と入力 ---
+# --- 月ごとの集計と目標入力 ---
 df["__year_month"] = df[date_col].dt.to_period("M")
 
-# 各行（日ごと／タイムスタンプごと）の合計（全時間帯列の合計）
+# 各行の全時間帯合計（対象列の合計）をとる
 df["_row_total"] = df[time_cols].sum(axis=1)
 
-# 月合計：各行の合計を月ごとに足す
+# 月ごとの元の合計使用量
 monthly_original = (
     df.groupby("__year_month")["_row_total"]
     .sum()
@@ -116,7 +121,7 @@ monthly_original = (
 monthly_original["表示用月"] = monthly_original.index.to_timestamp()
 
 st.subheader("各月の元の合計使用量と新しい月合計の入力")
-st.markdown("各月ごとに目標とする合計使用量を入力してください（全時間帯の合計がその値になるようスケーリングされます）。")
+st.markdown("各月ごとに目標とする合計使用量を入力してください。全時間帯列の合計がその値になるようにスケーリングします。")
 
 target_inputs = {}
 with st.form("monthly_targets_form"):
@@ -139,6 +144,7 @@ if not submitted:
     st.stop()
 
 # --- スケーリング ---
+# 各月の比率を計算
 scaling = {}
 for label, target in target_inputs.items():
     period = pd.Period(label, freq="M")
@@ -148,20 +154,13 @@ for label, target in target_inputs.items():
     else:
         scaling[period] = target / orig
 
+# 行ごとに係数を割り当て
 df_scaled = df.copy()
+df_scaled["__scale_factor"] = df_scaled["__year_month"].map(scaling)
 
-def scale_row(row):
-    period = row["__year_month"]
-    factor = scaling.get(period, np.nan)
-    if pd.isna(factor):
-        return row[time_cols]
-    return row[time_cols] * factor
-
-# 各時間帯列をスケーリング（全列一括）
-scaled_times = df_scaled.apply(lambda r: scale_row(r), axis=1)
-# DataFrame に戻して置き換え
+# 時間帯列を係数で一括スケーリング（NaNなら元のまま）
 for col in time_cols:
-    df_scaled[col] = scaled_times.apply(lambda x: x[col])
+    df_scaled[col] = df_scaled[col] * df_scaled["__scale_factor"].where(df_scaled["__scale_factor"].notna(), 1.0)
 
 # --- 結果表示 ---
 st.subheader("スケーリング後の各月合計の検証")
@@ -195,8 +194,8 @@ if not output_name.lower().endswith(".xlsx"):
     st.error("ファイル名は .xlsx で終わる必要があります。")
     st.stop()
 
-# 補助列を外して元の構造を保つ
-to_export = df_scaled.drop(columns=["__year_month", "_row_total"], errors="ignore")
+# 補助列を落として元の構造で出力
+to_export = df_scaled.drop(columns=["__year_month", "_row_total", "__scale_factor"], errors="ignore")
 
 def to_excel_bytes(df: pd.DataFrame):
     output = BytesIO()
@@ -207,7 +206,7 @@ def to_excel_bytes(df: pd.DataFrame):
 try:
     excel_bytes = to_excel_bytes(to_export)
 except ImportError:
-    st.error("Excel 出力に必要な openpyxl が見つかりません。requirements.txt に追加してください。")
+    st.error("Excel 出力に必要なライブラリ（openpyxl）が見つかりません。requirements.txt に追加してください。")
     st.stop()
 
 st.download_button(
