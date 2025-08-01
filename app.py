@@ -26,7 +26,17 @@ st.dataframe(df_raw.head())
 
 st.sidebar.header("2. 日付列選択")
 possible_date_cols = [col for col in df_raw.columns if pd.to_datetime(df_raw[col], errors='coerce').notna().mean() > 0.5]
-date_col = st.sidebar.selectbox("日付列を選択", options=df_raw.columns.tolist(), index=df_raw.columns.get_indexer([possible_date_cols[0]])[0] if possible_date_cols else 0)
+try:
+    default_index = df_raw.columns.tolist().index(possible_date_cols[0])
+except (IndexError, ValueError):
+    default_index = 0
+
+date_col = st.sidebar.selectbox(
+    "日付列を選択",
+    options=df_raw.columns.tolist(),
+    index=default_index
+)
+
 
 df = df_raw.copy()
 df[date_col] = pd.to_datetime(df[date_col])
