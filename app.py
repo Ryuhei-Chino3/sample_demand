@@ -100,7 +100,7 @@ if not time_cols:
     st.error("時間帯列が選択されていません。手動で 00:00:00 ～ 23:30:00 相当の列を選択してください。")
     st.stop()
 
-# --- 月ごとの集計と目標入力 ---
+# --- 月ごとの集計 ---
 df["__year_month"] = df[date_col].dt.to_period("M")
 df["_row_total"] = df[time_cols].sum(axis=1)
 
@@ -112,66 +112,32 @@ monthly_original = (
 )
 monthly_original["表示用月"] = monthly_original.index.to_timestamp()
 
-# --- 横並び入力フォーム ---
+# --- 表形式で目標入力（横並び性あり） ---
+editable = monthly_original.reset_index()
+editable["表示用月"] = editable["__year_month"].dt.strftime("%Y-%m")
+editable = editable.rename(columns={"元の月合計": "元の月合計使用量"})
+# 初期の目標を元の合計と同じにしておく
+editable["入力目標"] = editable["元の月合計使用量"]
+
+st.subheader("各月の元の合計使用量と新しい月合計の入力（表形式）")
+st.markdown("「入力目標」列を書き換えて各月ごとの目標合計を指定してください。全時間帯列の合計がその値になるようスケーリングされます。")
+
+# 編集可能テーブル（横スクロールあり）
+edited_df = st.experimental_data_editor(
+    editable[["__year_month", "表示用月", "元の月合計使用量", "入力目標"]],
+    num_rows="fixed",
+    use_container_width=True,
+)
+
+# target_inputs を再構成
 target_inputs = {}
-st.subheader("各月の元の合計使用量と新しい月合計の入力")
-st.markdown("各月ごとに目標とする合計使用量を入力してください。選択された全時間帯列の合計がその値になるようスケーリングされます。")
-
-with st.form("monthly_targets_form"):
-    # カード状の横スクロールコンテナ用スタイル
-    st.markdown(
-        """
-        <style>
-        .horizontal-inputs {
-            display: flex;
-            gap: 12px;
-            overflow-x: auto;
-            padding: 6px 0;
-        }
-        .monthly-box {
-            min-width: 160px;
-            flex: 0 0 auto;
-            background: #f1f5f9;
-            padding: 8px;
-            border-radius: 8px;
-            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-        }
-        .monthly-label {
-            font-weight: 600;
-            margin-bottom: 4px;
-            font-size: 0.9rem;
-        }
-        .small-meta {
-            font-size: 0.65rem;
-            color: #555;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown('<div class="horizontal-inputs">', unsafe_allow_html=True)
-    for period, row in monthly_original.iterrows():
-        label = period.strftime("%Y-%m")
-        orig = row["元の月合計"]
-        default = float(round(orig, 6))
-        st.markdown(f'<div class="monthly-box">', unsafe_allow_html=True)
-        st.markdown(f'<div class="monthly-label">{label}</div>', unsafe_allow_html=True)
-        st.markdown(f'<div class="small-meta">元の合計: {orig:.6f}</div>', unsafe_allow_html=True)
-        target_inputs[label] = st.number_input(
-            label="",  # HTML側で月表示済み
-            value=default,
-            format="%.6f",
-            key=f"target_{label}",
-            min_value=0.0,
-            help=f"{label} の目標（月合計）",
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
-    submitted = st.form_submit_button("スケーリング実行")
-
-if not submitted:
-    st.info("月ごとの目標使用量を入力して「スケーリング実行」を押してください。")
-    st.stop()
+for _, row in edited_df.iterrows():
+    label = row["表示用月"]  # "YYYY-MM"
+    try:
+        target_value = float(row["入力目標"])
+    except Exception:
+        target_value = float(row["元の月合計使用量"])
+    target_inputs[label] = target_value
 
 # --- スケーリング ---
 scaling = {}
@@ -189,7 +155,7 @@ df_scaled["__scale_factor"] = df_scaled["__year_month"].map(scaling)
 for col in time_cols:
     df_scaled[col] = df_scaled[col] * df_scaled["__scale_factor"].where(df_scaled["__scale_factor"].notna(), 1.0)
 
-# --- 検証表示 ---
+# --- 結果表示 ---
 st.subheader("スケーリング後の各月合計の検証")
 scaled_monthly = (
     df_scaled.groupby("__year_month")[time_cols]
