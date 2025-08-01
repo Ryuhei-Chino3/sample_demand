@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from io import BytesIO
-import calendar
 
 st.set_page_config(page_title="30分値リスケーリングアプリ", layout="wide")
 
@@ -27,13 +26,33 @@ if uploaded_file is None:
 # --- 読み込み ---
 @st.cache_data
 def load_sample(file) -> pd.DataFrame:
-    if str(file.name).lower().endswith(".csv"):
-        df = pd.read_csv(file)
-    else:
-        df = pd.read_excel(file)
+    name = file.name.lower()
+    try:
+        if name.endswith(".csv"):
+            df = pd.read_csv(file)
+        elif name.endswith((".xls", ".xlsx")):
+            try:
+                df = pd.read_excel(file)
+            except ImportError as ie:
+                # openpyxl がない/読み込めない場合
+                raise RuntimeError(
+                    "Excel 読み込みに必要なライブラリ（openpyxl）が見つかりません。"
+                    " requirements.txt に `openpyxl` を追加して再デプロイしてください。"
+                ) from ie
+        else:
+            raise ValueError("対応していないファイル形式です。CSVかXLSXをアップロードしてください。")
+    except Exception as e:
+        # 上位で表示させるため再送出
+        raise
     return df
 
-df_raw = load_sample(uploaded_file)
+# 実際の読込（エラーがあれば表示）
+try:
+    df_raw = load_sample(uploaded_file)
+except Exception as e:
+    st.error(f"ファイル読み込みでエラーが発生しました: {e}")
+    st.stop()
+
 st.subheader("1. アップロードされた元データの先頭（構造確認）")
 st.dataframe(df_raw.head())
 
@@ -51,9 +70,11 @@ for col in df_raw.columns:
         continue
 
 datetime_col = st.sidebar.selectbox(
-    "日時列を選択してください", options=df_raw.columns.tolist(), index=0 if possible_datetime == [] else df_raw.columns.get_indexer([possible_datetime[0]])[0]
+    "日時列を選択してください",
+    options=df_raw.columns.tolist(),
+    index=0 if not possible_datetime else df_raw.columns.get_indexer([possible_datetime[0]])[0]
 )
-# 試しに変換
+
 df = df_raw.copy()
 try:
     df[datetime_col] = pd.to_datetime(df[datetime_col])
@@ -61,9 +82,14 @@ except Exception as e:
     st.error(f"{datetime_col} を日時に変換できませんでした。形式を確認してください。詳細: {e}")
     st.stop()
 
-# 使用量っぽい列の候補（数値列）
 numeric_cols = df.select_dtypes(include="number").columns.tolist()
-usage_col = st.sidebar.selectbox("使用量（スケーリング対象）となる列を選択してください", options=numeric_cols)
+if not numeric_cols:
+    st.error("数値列が見つかりません。使用量列にあたる列を含んだデータをアップロードしてください。")
+    st.stop()
+
+usage_col = st.sidebar.selectbox(
+    "使用量（スケーリング対象）となる列を選択してください", options=numeric_cols
+)
 
 if usage_col is None or datetime_col is None:
     st.error("日時列と使用量列を正しく指定してください。")
@@ -72,18 +98,20 @@ if usage_col is None or datetime_col is None:
 # --- 月ごとの集計と入力フォーム ---
 df["__year_month"] = df[datetime_col].dt.to_period("M")  # e.g., 2024-06
 
-monthly_original = df.groupby("__year_month")[usage_col].sum().rename("元の月合計").to_frame()
+monthly_original = (
+    df.groupby("__year_month")[usage_col]
+    .sum()
+    .rename("元の月合計")
+    .to_frame()
+)
 monthly_original["表示用月"] = monthly_original.index.to_timestamp()
 
 st.subheader("2. 各月の元の合計使用量と新しい月合計の入力")
 st.markdown("必要な月ごとの目標合計使用量を入力してください。元の合計がゼロの月はスケーリングできないのでご注意を。")
 
-# フォームで並べて入力
-user_targets = {}
-cols = st.columns(1)
+target_inputs = {}
 with st.form("monthly_targets_form"):
-    target_inputs = {}
-    for idx, (period, row) in enumerate(monthly_original.iterrows()):
+    for period, row in monthly_original.iterrows():
         display_label = period.strftime("%Y-%m")
         original_val = row["元の月合計"]
         default = float(round(original_val, 6))
@@ -102,30 +130,36 @@ if not submitted:
     st.stop()
 
 # --- スケーリング処理 ---
-# 月ごとのスケーリング比率を計算
 scaling = {}
 for display_label, target_value in target_inputs.items():
     period = pd.Period(display_label, freq="M")
     orig = monthly_original.loc[period, "元の月合計"]
     if orig == 0:
-        scaling[period] = np.nan  # 変換できない
+        scaling[period] = np.nan
     else:
         scaling[period] = target_value / orig
 
-# 適用
 df_scaled = df.copy()
+
+
 def apply_scale(row):
     period = row["__year_month"]
     factor = scaling.get(period, np.nan)
     if pd.isna(factor):
-        return row[usage_col]  # 変更なし（または元が0で変更できない）
+        return row[usage_col]
     return row[usage_col] * factor
+
 
 df_scaled[usage_col] = df_scaled.apply(apply_scale, axis=1)
 
-# --- 完成データの確認 ---
+# --- 確認 ---
 st.subheader("3. スケーリング後の簡易検証（各月の合計）")
-scaled_monthly = df_scaled.groupby("__year_month")[usage_col].sum().rename("スケーリング後合計").to_frame()
+scaled_monthly = (
+    df_scaled.groupby("__year_month")[usage_col]
+    .sum()
+    .rename("スケーリング後合計")
+    .to_frame()
+)
 compare = monthly_original.join(scaled_monthly)
 compare["入力目標"] = [target_inputs[p.strftime("%Y-%m")] for p in compare.index]
 compare["比率（実績/目標）"] = compare["スケーリング後合計"] / compare["入力目標"].replace({0: np.nan})
@@ -136,32 +170,33 @@ st.dataframe(compare.style.format({
     "比率（実績/目標）": "{:.4f}"
 }))
 
-# 警告表示
 for period, row in compare.iterrows():
     if row["入力目標"] == 0 and row["元の月合計"] != 0:
         st.warning(f"{period.strftime('%Y-%m')} の入力目標が0です。元の値があるため、すべて0にスケーリングされます。")
     if row["元の月合計"] == 0:
         st.warning(f"{period.strftime('%Y-%m')} は元の合計が0のためスケーリングできていません（そのまま）。")
 
-# --- 出力ファイル名指定とダウンロード ---
+# --- 出力 ---
 st.subheader("4. 出力ファイル設定とダウンロード")
 output_name = st.text_input("出力ファイル名（拡張子 .xlsx を含めてください）", value="rescaled_30min.xlsx")
 if not output_name.lower().endswith(".xlsx"):
     st.error("ファイル名は .xlsx で終わる必要があります。")
     st.stop()
 
-# 元の構造を維持した Excel を作成（余計な列 __year_month を除去）
 to_export = df_scaled.copy()
 to_export = to_export.drop(columns=["__year_month"])
 
-# バイナリに書き出し
 def to_excel_bytes(df: pd.DataFrame):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Rescaled")
     return output.getvalue()
 
-excel_bytes = to_excel_bytes(to_export)
+try:
+    excel_bytes = to_excel_bytes(to_export)
+except ImportError:
+    st.error("Excel 書き出しに必要な `openpyxl` が見つかりません。requirements.txt に openpyxl を追加してください。")
+    st.stop()
 
 st.download_button(
     label="スケーリング結果をExcelでダウンロード",
