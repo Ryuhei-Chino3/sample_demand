@@ -11,6 +11,7 @@ st.markdown(
     """
     目的：サンプルの30分値データ（横に時間帯列を持つ形式）を、月ごとの合計使用量に合わせて
     **全ての時間帯列を同一比率でスケーリング**した新しいデータを出力します。
+    表示は小数点第一位で四捨五入しています。
     """
 )
 
@@ -111,28 +112,35 @@ monthly_original["表示用月"] = monthly_original.index.to_timestamp()
 
 # --- 月使用量入力（年月ラベル1行、その下に入力欄） ---
 st.subheader("各月の元の合計使用量と新しい月合計の入力")
-st.markdown("年月ラベルとその下に目標月使用量を横並びで入力してください。")
+st.markdown("年月ラベルの下に目標月使用量を横並びで入力してください。元の月合計はラベル下に小さく表示（小数点第一位）。")
 
-# フォーム
 with st.form("monthly_targets_form"):
     periods = list(monthly_original.index)
-    labels = [p.strftime("%Y/%-m") if hasattr(p, "strftime") else str(p) for p in periods]  # e.g., 2024/3
+    # ラベル例 "2024/3"
+    labels = [p.strftime("%Y/%-m") if hasattr(p, "strftime") else str(p) for p in periods]
     cols = st.columns(len(periods))
     target_inputs = {}
     for col, period, label in zip(cols, periods, labels):
         with col:
             st.markdown(f"**{label}**")
             orig = monthly_original.loc[period, "元の月合計"]
-            default = float(round(orig, 6))
-            val = st.number_input(
-                label="入力",
-                value=default,
-                format="%.6f",
+            st.markdown(f"<div style='font-size:0.75rem; color:gray;'>元の合計: {orig:.1f}</div>", unsafe_allow_html=True)
+            # 空白にしたいので text_input、空なら後で元の値を使う
+            user_str = st.text_input(
+                label="",
+                value="",
+                placeholder="例: 1234.5",
                 key=f"target_{period}",
-                min_value=0.0,
-                help=f"元の合計: {orig:.6f}",
+                help="目標の月合計使用量（空白なら元の値）",
             )
-            target_inputs[period.strftime("%Y-%m")] = float(val)
+            if user_str.strip() == "":
+                target_inputs[period.strftime("%Y-%m")] = float(orig)
+            else:
+                try:
+                    target_inputs[period.strftime("%Y-%m")] = float(user_str.replace(",", ""))
+                except ValueError:
+                    st.warning(f"{label} の入力が数値に解釈できません。元の合計を使います。")
+                    target_inputs[period.strftime("%Y-%m")] = float(orig)
     submitted = st.form_submit_button("スケーリング実行")
 
 if not submitted:
@@ -167,10 +175,11 @@ scaled_monthly = (
 compare = monthly_original.join(scaled_monthly)
 compare["入力目標"] = [target_inputs[p.strftime("%Y-%m")] for p in compare.index]
 compare["比率（実績/目標）"] = compare["スケーリング後合計"] / compare["入力目標"].replace({0: np.nan})
+# 表示は小数点第一位（比率だけ4桁）
 st.dataframe(compare.style.format({
-    "元の月合計": "{:.6f}",
-    "スケーリング後合計": "{:.6f}",
-    "入力目標": "{:.6f}",
+    "元の月合計": "{:.1f}",
+    "スケーリング後合計": "{:.1f}",
+    "入力目標": "{:.1f}",
     "比率（実績/目標）": "{:.4f}"
 }))
 
