@@ -223,12 +223,16 @@ def to_excel_bytes_with_curve(df_rescaled: pd.DataFrame, curve_df: pd.DataFrame)
     chart.x_axis.title = "時間帯"
 
     cats = Reference(ws, min_col=1, min_row=2, max_row=max_row)
+    # 各月の系列を追加して、ヘッダーをタイトルに安全に設定
     for col_idx in range(2, max_col + 1):
         data = Reference(ws, min_col=col_idx, min_row=2, max_row=max_row)
         chart.add_data(data, titles_from_data=False)
         header_value = ws.cell(row=1, column=col_idx).value
-        if chart.series:
-            chart.series[-1].title = header_value
+        if header_value is not None:
+            try:
+                chart.series[-1].title = str(header_value)
+            except Exception:
+                pass  # 安全に無視
 
     chart.set_categories(cats)
     ws.add_chart(chart, f"B{max_row + 2}")
