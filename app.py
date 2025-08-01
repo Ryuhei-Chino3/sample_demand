@@ -3,15 +3,18 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 import re
+from openpyxl import load_workbook
+from openpyxl.chart import LineChart, Reference
+from openpyxl.utils import get_column_letter
 
 st.set_page_config(page_title="30分値リスケーリング（全時間帯）", layout="wide")
 
-st.title("サンプル30分値リスケーリングアプリ（全時間帯）")
+st.title("サンプル30分値リスケーリングアプリ（全時間帯 + デマンドカーブ）")
 st.markdown(
     """
     目的：サンプルの30分値データ（横に時間帯列を持つ形式）を、月ごとの合計使用量に合わせて
-    **全ての時間帯列を同一比率でスケーリング**した新しいデータを出力します。
-    表示は小数点第一位で四捨五入しています。
+    **全ての時間帯列を同一比率でスケーリング**し、さらに各月の平均的なデマンドカーブをグラフ付きで
+    出力する Excel ファイルを生成します。表示は小数点第一位で四捨五入しています。
     """
 )
 
@@ -116,7 +119,6 @@ st.markdown("年月ラベルの下に目標月使用量を横並びで入力し�
 
 with st.form("monthly_targets_form"):
     periods = list(monthly_original.index)
-    # ラベル例 "2024/3"
     labels = [p.strftime("%Y/%-m") if hasattr(p, "strftime") else str(p) for p in periods]
     cols = st.columns(len(periods))
     target_inputs = {}
@@ -125,7 +127,6 @@ with st.form("monthly_targets_form"):
             st.markdown(f"**{label}**")
             orig = monthly_original.loc[period, "元の月合計"]
             st.markdown(f"<div style='font-size:0.75rem; color:gray;'>元の合計: {orig:.1f}</div>", unsafe_allow_html=True)
-            # 空白にしたいので text_input、空なら後で元の値を使う
             user_str = st.text_input(
                 label="",
                 value="",
@@ -163,6 +164,19 @@ df_scaled["__scale_factor"] = df_scaled["__year_month"].map(scaling)
 for col in time_cols:
     df_scaled[col] = df_scaled[col] * df_scaled["__scale_factor"].where(df_scaled["__scale_factor"].notna(), 1.0)
 
+# --- デマンドカーブ（各月の平均プロファイル）作成 ---
+# 各月ごとに時間帯列の平均（30分値の平均プロファイル）
+monthly_profile = (
+    df_scaled.groupby("__year_month")[time_cols]
+    .mean()
+    .rename_axis(index="__year_month")
+)  # index is Period
+
+# 形式整形：行を時間帯、列を YYYY-MM 表示
+profile_df = monthly_profile.T  # time_cols as index, months as columns
+# Convert Period columns to string like "2024-03"
+profile_df.columns = [p.strftime("%Y-%m") for p in profile_df.columns]
+
 # --- 検証表示 ---
 st.subheader("スケーリング後の各月合計の検証")
 scaled_monthly = (
@@ -175,7 +189,6 @@ scaled_monthly = (
 compare = monthly_original.join(scaled_monthly)
 compare["入力目標"] = [target_inputs[p.strftime("%Y-%m")] for p in compare.index]
 compare["比率（実績/目標）"] = compare["スケーリング後合計"] / compare["入力目標"].replace({0: np.nan})
-# 表示は小数点第一位（比率だけ4桁）
 st.dataframe(compare.style.format({
     "元の月合計": "{:.1f}",
     "スケーリング後合計": "{:.1f}",
@@ -191,27 +204,70 @@ for period, row in compare.iterrows():
 
 # --- 出力 ---
 st.subheader("出力ファイル設定とダウンロード")
-output_name = st.text_input("出力ファイル名（.xlsx で終わる）", value="rescaled_30min_full.xlsx")
+output_name = st.text_input("出力ファイル名（.xlsx で終わる）", value="rescaled_30min_full_with_curve.xlsx")
 if not output_name.lower().endswith(".xlsx"):
     st.error("ファイル名は .xlsx で終わる必要があります。")
     st.stop()
 
-to_export = df_scaled.drop(columns=["__year_month", "_row_total", "__scale_factor"], errors="ignore")
-
-def to_excel_bytes(df: pd.DataFrame):
+def to_excel_bytes_with_curve(df_rescaled: pd.DataFrame, curve_df: pd.DataFrame):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Rescaled")
-    return output.getvalue()
+        # スケーリング済みデータ（元の構造を保つ）
+        to_export_main = df_rescaled.drop(columns=["__year_month", "_row_total", "__scale_factor"], errors="ignore")
+        to_export_main.to_excel(writer, index=False, sheet_name="Rescaled")
+        # デマンドカーブ元データ（時間帯 × 月）
+        # Insert a column for time label at top
+        curve_df_reset = curve_df.reset_index()
+        curve_df_reset = curve_df_reset.rename(columns={"index": "時間帯"})
+        curve_df_reset.to_excel(writer, index=False, sheet_name="DemandCurve")
+        writer.save()
+
+    # Now open to add chart
+    output.seek(0)
+    wb = load_workbook(filename=output)
+    ws = wb["DemandCurve"]
+
+    # Determine data range: time in A, months in B...
+    max_row = ws.max_row
+    max_col = ws.max_column
+
+    chart = LineChart()
+    chart.title = "月ごとの平均デマンドカーブ（時間帯ごと）"
+    chart.y_axis.title = "平均使用量"
+    chart.x_axis.title = "時間帯"
+
+    # X axis: time labels in column A, skip header row
+    cats = Reference(ws, min_col=1, min_row=2, max_row=max_row)
+
+    # Each month series
+    for col_idx in range(2, max_col + 1):
+        data = Reference(ws, min_col=col_idx, min_row=1, max_row=max_row)  # includes header for titles
+        series = Reference(ws, min_col=col_idx, min_row=2, max_row=max_row)
+        chart.add_data(series, titles_from_data=False)
+    chart.set_categories(cats)
+    # Improve legend: use header row labels as series titles
+    for i, col_idx in enumerate(range(2, max_col + 1)):
+        if i < len(chart.series):
+            header_cell = ws.cell(row=1, column=col_idx).value
+            chart.series[i].title = header_cell
+
+    # Place chart below table (e.g., starting two rows after)
+    anchor_row = max_row + 2
+    ws.add_chart(chart, f"B{anchor_row}")
+
+    # Save workbook back to bytes
+    out_bytes = BytesIO()
+    wb.save(out_bytes)
+    return out_bytes.getvalue()
 
 try:
-    excel_bytes = to_excel_bytes(to_export)
+    excel_bytes = to_excel_bytes_with_curve(df_scaled, profile_df)
 except ImportError:
-    st.error("Excel 出力に必要なライブラリ（openpyxl）が見つかりません。requirements.txt に追加してください。")
+    st.error("Excel 出力に必要なライブラリが見つかりません。openpyxl を requirements.txt に追加してください。")
     st.stop()
 
 st.download_button(
-    label="スケーリング結果を Excel ダウンロード",
+    label="スケーリング結果（グラフ付き）を Excel ダウンロード",
     data=excel_bytes,
     file_name=output_name,
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
