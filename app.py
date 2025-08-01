@@ -19,7 +19,6 @@ st.sidebar.header("1. サンプルファイルをアップロード")
 uploaded_file = st.sidebar.file_uploader(
     "CSV または XLSX をアップロード", type=["csv", "xlsx"], accept_multiple_files=False
 )
-
 if uploaded_file is None:
     st.warning("まずはサンプルの30分値データ（CSV または XLSX）をアップロードしてください。")
     st.stop()
@@ -29,10 +28,10 @@ if uploaded_file is None:
 def load_sample(file) -> pd.DataFrame:
     name = file.name.lower()
     if name.endswith(".csv"):
-        df = pd.read_csv(file)
+        return pd.read_csv(file)
     elif name.endswith((".xls", ".xlsx")):
         try:
-            df = pd.read_excel(file)
+            return pd.read_excel(file)
         except ImportError as ie:
             raise RuntimeError(
                 "Excel 読み込みに必要なライブラリ（openpyxl）が見つかりません。"
@@ -40,7 +39,6 @@ def load_sample(file) -> pd.DataFrame:
             ) from ie
     else:
         raise ValueError("対応していないファイル形式です。CSVかXLSXをアップロードしてください。")
-    return df
 
 try:
     df_raw = load_sample(uploaded_file)
@@ -54,7 +52,6 @@ st.dataframe(df_raw.head())
 # --- 日付/日時列指定 ---
 st.sidebar.header("2. 日付列と時間帯列の指定")
 
-# 日付っぽい列を自動検出
 possible_date_cols = []
 for col in df_raw.columns:
     try:
@@ -82,7 +79,7 @@ except Exception as e:
     st.error(f"{date_col} を日時に変換できませんでした。形式を確認してください。詳細: {e}")
     st.stop()
 
-# --- 時間帯列の自動検出（00:00:00 形式を優先） ---
+# --- 時間帯列の自動検出（00:00:00 形式優先、フォールバックあり） ---
 expected_time_labels_hms = [f"{h:02d}:{m:02d}:00" for h in range(24) for m in (0, 30)]
 candidate_time_cols = [c for c in df.columns if str(c).strip() in expected_time_labels_hms]
 if not candidate_time_cols:
@@ -112,32 +109,97 @@ monthly_original = (
 )
 monthly_original["表示用月"] = monthly_original.index.to_timestamp()
 
-# --- 表形式で目標入力（横並び性あり） ---
-editable = monthly_original.reset_index()
-editable["表示用月"] = editable["__year_month"].dt.strftime("%Y-%m")
-editable = editable.rename(columns={"元の月合計": "元の月合計使用量"})
-# 初期の目標を元の合計と同じにしておく
-editable["入力目標"] = editable["元の月合計使用量"]
-
-st.subheader("各月の元の合計使用量と新しい月合計の入力（表形式）")
-st.markdown("「入力目標」列を書き換えて各月ごとの目標合計を指定してください。全時間帯列の合計がその値になるようスケーリングされます。")
-
-# 編集可能テーブル（横スクロールあり）
-edited_df = st.experimental_data_editor(
-    editable[["__year_month", "表示用月", "元の月合計使用量", "入力目標"]],
-    num_rows="fixed",
-    use_container_width=True,
-)
-
-# target_inputs を再構成
+# --- 目標入力（表形式を優先、なければカード形式） ---
 target_inputs = {}
-for _, row in edited_df.iterrows():
-    label = row["表示用月"]  # "YYYY-MM"
-    try:
-        target_value = float(row["入力目標"])
-    except Exception:
-        target_value = float(row["元の月合計使用量"])
-    target_inputs[label] = target_value
+st.subheader("各月の元の合計使用量と新しい月合計の入力")
+st.markdown("各月ごとに目標とする合計使用量を指定してください。選択された全時間帯列の合計がその値になるようスケーリングされます。")
+
+use_table = False
+edited_df = None
+# 優先：experimental_data_editor または data_editor
+if hasattr(st, "experimental_data_editor"):
+    use_table = True
+    editable = monthly_original.reset_index()
+    editable["表示用月"] = editable["__year_month"].dt.strftime("%Y-%m")
+    editable = editable.rename(columns={"元の月合計": "元の月合計使用量"})
+    editable["入力目標"] = editable["元の月合計使用量"]
+    edited_df = st.experimental_data_editor(
+        editable[["__year_month", "表示用月", "元の月合計使用量", "入力目標"]],
+        num_rows="fixed",
+        use_container_width=True,
+    )
+elif hasattr(st, "data_editor"):
+    use_table = True
+    editable = monthly_original.reset_index()
+    editable["表示用月"] = editable["__year_month"].dt.strftime("%Y-%m")
+    editable = editable.rename(columns={"元の月合計": "元の月合計使用量"})
+    editable["入力目標"] = editable["元の月合計使用量"]
+    edited_df = st.data_editor(
+        editable[["__year_month", "表示用月", "元の月合計使用量", "入力目標"]],
+        num_rows="fixed",
+        use_container_width=True,
+    )
+
+if use_table and edited_df is not None:
+    for _, row in edited_df.iterrows():
+        label = row["表示用月"]  # "YYYY-MM"
+        try:
+            target_value = float(row["入力目標"])
+        except Exception:
+            target_value = float(row["元の月合計使用量"])
+        target_inputs[label] = target_value
+else:
+    # フォールバック：横スクロールカード入力（number_input）
+    st.markdown(
+        """
+        <style>
+        .horizontal-inputs {
+            display: flex;
+            gap: 12px;
+            overflow-x: auto;
+            padding: 6px 0;
+        }
+        .monthly-box {
+            min-width: 160px;
+            flex: 0 0 auto;
+            background: #f1f5f9;
+            padding: 8px;
+            border-radius: 8px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        }
+        .monthly-label {
+            font-weight: 600;
+            margin-bottom: 4px;
+            font-size: 0.9rem;
+        }
+        .small-meta {
+            font-size: 0.65rem;
+            color: #555;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown('<div class="horizontal-inputs">', unsafe_allow_html=True)
+    for period, row in monthly_original.iterrows():
+        label = period.strftime("%Y-%m")
+        orig = row["元の月合計"]
+        default = float(round(orig, 6))
+        st.markdown(f'<div class="monthly-box">', unsafe_allow_html=True)
+        st.markdown(f'<div class="monthly-label">{label}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="small-meta">元の合計: {orig:.6f}</div>', unsafe_allow_html=True)
+        # number_input を直接使う（ラベル空にして見た目をコンパクトに）
+        target_value = st.number_input(
+            label="",
+            value=default,
+            format="%.6f",
+            key=f"target_{label}",
+            min_value=0.0,
+            help=f"{label} の目標（月合計）",
+        )
+        st.markdown("</div>", unsafe_allow_html=True)
+        target_inputs[label] = float(target_value)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # --- スケーリング ---
 scaling = {}
@@ -155,7 +217,7 @@ df_scaled["__scale_factor"] = df_scaled["__year_month"].map(scaling)
 for col in time_cols:
     df_scaled[col] = df_scaled[col] * df_scaled["__scale_factor"].where(df_scaled["__scale_factor"].notna(), 1.0)
 
-# --- 結果表示 ---
+# --- 検証表示 ---
 st.subheader("スケーリング後の各月合計の検証")
 scaled_monthly = (
     df_scaled.groupby("__year_month")[time_cols]
